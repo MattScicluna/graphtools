@@ -19,6 +19,13 @@ import numpy as np
 import tasklogger
 import warnings
 
+from .backends import (
+    SklearnKNNBackend,
+    PynndescentKNNBackend,
+    KNNBackend,
+)
+
+
 _logger = tasklogger.get_tasklogger("graphtools")
 
 
@@ -80,6 +87,7 @@ class kNNGraph(DataGraph):
         distance="euclidean",
         thresh=1e-4,
         n_pca=None,
+        backend="sklearn",
         **kwargs,
     ):
 
@@ -133,6 +141,7 @@ class kNNGraph(DataGraph):
         self.bandwidth_scale = bandwidth_scale
         self.distance = distance
         self.thresh = thresh
+        self.backend = backend
         super().__init__(data, n_pca=n_pca, **kwargs)
 
     def get_params(self):
@@ -211,42 +220,25 @@ class kNNGraph(DataGraph):
 
     @property
     def knn_tree(self):
-        """KNN tree object (cached)
-
-        Builds or returns the fitted KNN tree.
-        TODO: can we be more clever than sklearn when it comes to choosing
-        between KD tree, ball tree and brute force?
-
-        Returns
-        -------
-        knn_tree : `sklearn.neighbors.NearestNeighbors`
-        """
-        try:
+        if hasattr(self, "_knn_tree"):
             return self._knn_tree
-        except AttributeError:
-            try:
-                self._knn_tree = NearestNeighbors(
-                    n_neighbors=self.knn + 1,
-                    algorithm="ball_tree",
-                    metric=self.distance,
-                    n_jobs=self.n_jobs,
-                ).fit(self.data_nu)
-            except ValueError:
-                # invalid metric
-                warnings.warn(
-                    "Metric {} not valid for `sklearn.neighbors.BallTree`. "
-                    "Graph instantiation may be slower than normal.".format(
-                        self.distance
-                    ),
-                    UserWarning,
-                )
-                self._knn_tree = NearestNeighbors(
-                    n_neighbors=self.knn + 1,
-                    algorithm="auto",
-                    metric=self.distance,
-                    n_jobs=self.n_jobs,
-                ).fit(self.data_nu)
-            return self._knn_tree
+
+        if self.backend == "sklearn":
+            print('using sklearn backend')
+            self._knn_tree = SklearnKNNBackend(
+                self.data_nu, n_neighbors=self.knn + 1,
+                metric=self.distance, n_jobs=self.n_jobs
+            )
+        elif self.backend == "pynndescent":
+            print('using pynndescent backend')
+            self._knn_tree = PynndescentKNNBackend(
+                self.data_nu, n_neighbors=self.knn + 1,
+                metric=self.distance, n_jobs=self.n_jobs
+            )
+        else:
+            raise ValueError(f"Unknown kNN backend '{self.backend}'")
+
+        return self._knn_tree
 
     def build_kernel(self):
         """Build the KNN kernel.
