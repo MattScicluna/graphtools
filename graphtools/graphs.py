@@ -489,7 +489,7 @@ class LandmarkGraph(DataGraph):
     >>> X_full = G.interpolate(X_landmark)
     """
 
-    def __init__(self, data, n_landmark=2000, n_svd=100, random_landmarking = False, **kwargs):
+    def __init__(self, data, n_landmark=2000, n_svd=100, random_landmarking=False, **kwargs):
         """Initialize a landmark graph.
 
         Raises
@@ -638,7 +638,6 @@ class LandmarkGraph(DataGraph):
     def build_landmark_op(self):
         """Build the landmark operator
 
-
             Calculates spectral clusters on the kernel, and calculates transition
             probabilities between cluster centers by using transition probabilities
             between samples assigned to each cluster.
@@ -647,25 +646,22 @@ class LandmarkGraph(DataGraph):
             This method randomly selects n_landmark points and assigns each sample to its nearest landmark
             using Euclidean distance .
 
-            
         """
-        if self.random_landmarking :
-            with _logger.log_task("landmark operator"):
-                is_sparse = sparse.issparse(self.kernel)
-                n_samples = self.data.shape[0]
-                rng = np.random.default_rng(self.random_state)
-                landmark_indices = rng.choice(n_samples, self.n_landmark, replace=False)
-                data = self.data if not hasattr(self, 'data_nu') else self.data_nu # because of the scaling to review
-                distances = cdist(data, data[landmark_indices], metric="euclidean")
+        with _logger.log_task("landmark operator"):
+            is_sparse = sparse.issparse(self.kernel)
+            if self.random_landmarking :
+                with _logger.log_task("Distances"):
+                    n_samples = self.data.shape[0]
+                    rng = np.random.default_rng(self.random_state)
+                    landmark_indices = rng.choice(n_samples, self.n_landmark, replace=False)
+                    data = self.data if not hasattr(self, 'data_nu') else self.data_nu # because of the scaling to review
+                    distances = cdist(data, data[landmark_indices], metric="euclidean")
                 if n_samples > 5000:   # sklearn.euclidean_distances is faster than cdist for big dataset 
                     distances = euclidean_distances(data, data[landmark_indices])
                 else:
                     distances = cdist(data, data[landmark_indices], metric="euclidean")
                 self._clusters = np.argmin(distances, axis=1)
-
-        else:
-            with _logger.log_task("landmark operator"):
-                is_sparse = sparse.issparse(self.kernel)
+            else:
                 # spectral clustering
                 with _logger.log_task("SVD"):
                     _, _, VT = randomized_svd(
@@ -682,8 +678,6 @@ class LandmarkGraph(DataGraph):
                         random_state=self.random_state,
                     )
                     self._clusters = kmeans.fit_predict(self.diff_op.dot(VT.T))
-
-
 
             # transition matrices
             pmn = self._landmarks_to_data()
