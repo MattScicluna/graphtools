@@ -77,8 +77,11 @@ def Graph(
         where s_max is the maximum singular value of the data matrix
         and eps is numerical precision. [press2007]_.
 
-    knn : `int`, optional (default: 5)
-        Number of nearest neighbors (including self) to use to build the graph
+    knn : `int` or list of `int`, optional (default: 5)
+        Number of nearest neighbors (including self) to use to build the graph.
+        If a list is provided, multiple kernels are computed (one for each knn value)
+        and averaged to create a multiscale kernel that captures both local and
+        global structure.
 
     decay : `int` or `None`, optional (default: 40)
         Rate of alpha decay to use. If `None`, alpha decay is not used and a vanilla

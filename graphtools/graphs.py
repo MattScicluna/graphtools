@@ -570,8 +570,11 @@ class kNNGraph(DataGraph):
         accepted types: `numpy.ndarray`, `scipy.sparse.spmatrix`,
         `pandas.DataFrame`, `pandas.SparseDataFrame`.
 
-    knn : `int`, optional (default: 5)
-        Number of nearest neighbors (including self) to use to build the graph
+    knn : `int` or list of `int`, optional (default: 5)
+        Number of nearest neighbors (including self) to use to build the graph.
+        If a list is provided, multiple kernels are computed (one for each knn value)
+        and averaged to create a multiscale kernel that captures both local and
+        global structure.
 
     decay : `int` or `None`, optional (default: `None`)
         Rate of alpha decay to use. If `None`, alpha decay is not used.
@@ -640,20 +643,45 @@ class kNNGraph(DataGraph):
             knn = 5
         if decay is None and bandwidth is not None:
             warnings.warn("`bandwidth` is not used when `decay=None`.", UserWarning)
-        if knn > data.shape[0] - 2:
-            warnings.warn(
-                "Cannot set knn ({k}) to be greater than "
-                "n_samples - 2 ({n}). Setting knn={n}".format(
-                    k=knn, n=data.shape[0] - 2
+
+        # Handle knn as list (multiscale kernel)
+        if isinstance(knn, (list, tuple, np.ndarray)):
+            knn = list(knn)
+            if len(knn) == 0:
+                raise ValueError("knn list cannot be empty")
+            # Validate all knn values
+            for i, k in enumerate(knn):
+                if not isinstance(k, (int, np.integer)):
+                    raise ValueError(f"All knn values must be integers, got {type(k)} at index {i}")
+                if k > data.shape[0] - 2:
+                    warnings.warn(
+                        "Cannot set knn[{i}] ({k}) to be greater than "
+                        "n_samples - 2 ({n}). Setting knn[{i}]={n}".format(
+                            i=i, k=k, n=data.shape[0] - 2
+                        )
+                    )
+                    knn[i] = data.shape[0] - 2
+            # Store multiscale flag and use max knn for tree construction
+            self.knn_list = knn
+            knn_for_tree = max(knn)
+        else:
+            # Single scale
+            self.knn_list = None
+            if knn > data.shape[0] - 2:
+                warnings.warn(
+                    "Cannot set knn ({k}) to be greater than "
+                    "n_samples - 2 ({n}). Setting knn={n}".format(
+                        k=knn, n=data.shape[0] - 2
+                    )
                 )
-            )
-            knn = data.shape[0] - 2
-        if knn_max is not None and knn_max < knn:
+                knn = data.shape[0] - 2
+            knn_for_tree = knn
+        if knn_max is not None and knn_max < knn_for_tree:
             warnings.warn(
                 "Cannot set knn_max ({knn_max}) to be less than "
-                "knn ({knn}). Setting knn_max={knn}".format(knn=knn, knn_max=knn_max)
+                "knn ({knn}). Setting knn_max={knn}".format(knn=knn_for_tree, knn_max=knn_max)
             )
-            knn_max = knn
+            knn_max = knn_for_tree
         if n_pca in [None, 0, False] and data.shape[1] > 500:
             warnings.warn(
                 "Building a kNNGraph on data of shape {} is "
@@ -661,7 +689,9 @@ class kNNGraph(DataGraph):
                 UserWarning,
             )
 
-        self.knn = knn
+        # Store knn (either int or list for multiscale)
+        self.knn = self.knn_list if self.knn_list is not None else knn
+        self._knn_for_tree = knn_for_tree  # Used for tree construction
         self.knn_max = knn_max
         self.search_multiplier = search_multiplier
         self.decay = decay
@@ -750,6 +780,7 @@ class kNNGraph(DataGraph):
         """KNN tree object (cached)
 
         Builds or returns the fitted KNN tree.
+        For multiscale kernels, uses the maximum knn value.
         TODO: can we be more clever than sklearn when it comes to choosing
         between KD tree, ball tree and brute force?
 
@@ -761,7 +792,7 @@ class kNNGraph(DataGraph):
             return self._knn_tree
         except AttributeError:
             self._knn_tree = NearestNeighbors(
-                n_neighbors=self.knn + 1,
+                n_neighbors=self._knn_for_tree + 1,
                 algorithm="auto",
                 metric=self.distance,
                 n_jobs=self.n_jobs,
@@ -772,6 +803,7 @@ class kNNGraph(DataGraph):
         """Build the KNN kernel.
 
         Build a k nearest neighbors kernel, optionally with alpha decay.
+        If knn is a list (multiscale), builds multiple kernels and averages them.
         Must return a symmetric matrix
 
         Returns
@@ -781,7 +813,23 @@ class kNNGraph(DataGraph):
             with no non-negative entries.
         """
         knn_max = self.knn_max + 1 if self.knn_max else None
-        K = self.build_kernel_to_data(self.data_nu, knn=self.knn + 1, knn_max=knn_max)
+
+        if self.knn_list is not None:
+            # Multiscale kernel: build and average multiple kernels
+            with _logger.log_task("multiscale kernel"):
+                kernels = []
+                for k in self.knn_list:
+                    _logger.log_info(f"Building kernel with knn={k}")
+                    K_k = self.build_kernel_to_data(self.data_nu, knn=k + 1, knn_max=knn_max)
+                    kernels.append(K_k)
+
+                # Average kernels (arithmetic mean)
+                _logger.log_info(f"Averaging {len(kernels)} kernels")
+                K = sum(kernels) / len(kernels)
+        else:
+            # Single scale kernel
+            K = self.build_kernel_to_data(self.data_nu, knn=self.knn + 1, knn_max=knn_max)
+
         return K
 
     def _check_duplicates(self, distances, indices):
@@ -1410,14 +1458,34 @@ class TraditionalGraph(DataGraph):
             )
         if knn is None and bandwidth is None:
             raise ValueError("Either `knn` or `bandwidth` must be provided.")
-        if knn is not None and knn > data.shape[0] - 2:
-            warnings.warn(
-                "Cannot set knn ({k}) to be greater than "
-                " n_samples - 2 ({n}). Setting knn={n}".format(
-                    k=knn, n=data.shape[0] - 2
-                )
-            )
-            knn = data.shape[0] - 2
+
+        # Handle knn validation for both int and list
+        if knn is not None:
+            if isinstance(knn, (list, tuple, np.ndarray)):
+                # Validate list of knn values
+                if len(knn) == 0:
+                    raise ValueError("knn list cannot be empty")
+                for i, k in enumerate(knn):
+                    if not isinstance(k, (int, np.integer)):
+                        raise ValueError(f"All knn values must be integers, got {type(k)} at index {i}")
+                    if k > data.shape[0] - 2:
+                        warnings.warn(
+                            "Cannot set knn[{i}] ({k}) to be greater than "
+                            " n_samples - 2 ({n}). Setting knn[{i}]={n}".format(
+                                i=i, k=k, n=data.shape[0] - 2
+                            )
+                        )
+                        knn[i] = data.shape[0] - 2
+            else:
+                # Single knn value
+                if knn > data.shape[0] - 2:
+                    warnings.warn(
+                        "Cannot set knn ({k}) to be greater than "
+                        " n_samples - 2 ({n}). Setting knn={n}".format(
+                            k=knn, n=data.shape[0] - 2
+                        )
+                    )
+                    knn = data.shape[0] - 2
         if precomputed is not None:
             if precomputed not in ["distance", "affinity", "adjacency"]:
                 raise ValueError(

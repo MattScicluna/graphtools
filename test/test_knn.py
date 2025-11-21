@@ -706,3 +706,92 @@ def test_set_params():
         anisotropy=G.anisotropy,
         kernel_symm=G.kernel_symm,
     )
+
+
+#####################################################
+# Multiscale Kernel Tests
+#####################################################
+
+
+def test_multiscale_kernel_basic():
+    """Test multiscale kernel with list of knn values"""
+    G = build_graph(data, knn=[3, 10], decay=10, thresh=1e-4)
+    assert isinstance(G.knn, list)
+    assert G.knn == [3, 10]
+    assert G._knn_for_tree == 10  # Should use max for tree
+    assert G.knn_tree.n_neighbors == 11  # max(knn) + 1
+    # Check kernel is built
+    assert G.K.shape == (data.shape[0], data.shape[0])
+    assert np.all(np.isfinite(G.K.data))
+
+
+def test_multiscale_kernel_single_value_list():
+    """Test that knn=[5] works same as knn=5"""
+    G_single = build_graph(data, knn=5, decay=10, thresh=1e-4)
+    G_list = build_graph(data, knn=[5], decay=10, thresh=1e-4)
+    assert isinstance(G_list.knn, list)
+    assert G_list.knn == [5]
+    # Kernels should be identical
+    np.testing.assert_array_almost_equal(G_single.K.toarray(), G_list.K.toarray())
+
+
+def test_multiscale_kernel_different_from_single():
+    """Test that multiscale kernel differs from single scale"""
+    G_single = build_graph(data, knn=5, decay=10, thresh=1e-4)
+    G_multi = build_graph(data, knn=[3, 10], decay=10, thresh=1e-4)
+    # Multiscale should be different from single scale
+    assert not np.allclose(G_single.K.toarray(), G_multi.K.toarray())
+
+
+def test_multiscale_kernel_averaging():
+    """Test that multiscale kernel is average of individual kernels"""
+    # Build individual kernels
+    G1 = build_graph(data, knn=3, decay=10, thresh=1e-4)
+    G2 = build_graph(data, knn=10, decay=10, thresh=1e-4)
+    # Build multiscale kernel
+    G_multi = build_graph(data, knn=[3, 10], decay=10, thresh=1e-4)
+    # Check that multiscale is average
+    K_expected = (G1.K + G2.K) / 2
+    np.testing.assert_array_almost_equal(K_expected.toarray(), G_multi.K.toarray())
+
+
+def test_multiscale_kernel_empty_list():
+    """Test that empty knn list raises error"""
+    with assert_raises_message(ValueError, "knn list cannot be empty"):
+        build_graph(data, knn=[], decay=10)
+
+
+def test_multiscale_kernel_invalid_type():
+    """Test that non-integer values in knn list raise error"""
+    with assert_raises_message(
+        ValueError, "All knn values must be integers"
+    ):
+        build_graph(data, knn=[5, 10.5], decay=10)
+
+
+def test_multiscale_kernel_three_scales():
+    """Test multiscale with three different scales"""
+    G = build_graph(data, knn=[3, 5, 15], decay=10, thresh=1e-4)
+    assert G.knn == [3, 5, 15]
+    assert G._knn_for_tree == 15
+    # Build individual and check averaging
+    G1 = build_graph(data, knn=3, decay=10, thresh=1e-4)
+    G2 = build_graph(data, knn=5, decay=10, thresh=1e-4)
+    G3 = build_graph(data, knn=15, decay=10, thresh=1e-4)
+    K_expected = (G1.K + G2.K + G3.K) / 3
+    np.testing.assert_array_almost_equal(K_expected.toarray(), G.K.toarray())
+
+
+def test_multiscale_kernel_no_decay():
+    """Test multiscale kernel without decay"""
+    G = build_graph(data, knn=[3, 10], decay=None)
+    assert G.knn == [3, 10]
+    assert G.K.shape == (data.shape[0], data.shape[0])
+
+
+def test_multiscale_kernel_with_pca():
+    """Test multiscale kernel with PCA preprocessing"""
+    G = build_graph(data, knn=[3, 10], decay=10, thresh=1e-4, n_pca=20)
+    assert G.knn == [3, 10]
+    assert G.data_nu.shape[1] == 20
+    assert G.K.shape == (data.shape[0], data.shape[0])
